@@ -1,0 +1,5 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="widget_name">오늘 밤 추천 취침</string>
+    <string name="widget_description">추천 취침 시각과 현재 수면 부채를 보여줘요</string>
+</resources>

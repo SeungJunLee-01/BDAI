@@ -4,6 +4,8 @@
     <!-- Health Connect에서 수면 데이터를 읽기 위한 권한 -->
     <uses-permission android:name="android.permission.health.READ_SLEEP" />
     <uses-permission android:name="android.permission.health.WRITE_SLEEP" />
+    <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_HISTORY" />
+    <uses-permission android:name="android.permission.health.READ_HEALTH_DATA_IN_BACKGROUND" />
 
     <!-- Android 11+ 패키지 가시성: Health Connect 앱이 설치되어 있는지 확인하기 위해 필요 -->
     <queries>
@@ -23,6 +25,18 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
+        <receiver
+            android:name=".SleepWidgetProvider"
+            android:exported="false"
+            android:label="@string/widget_name">
+            <intent-filter>
+                <action android:name="android.appwidget.action.APPWIDGET_UPDATE" />
+            </intent-filter>
+            <meta-data
+                android:name="android.appwidget.provider"
+                android:resource="@xml/sleep_widget_info" />
+        </receiver>
 
         <!-- Android 13 이하: Health Connect 권한 화면의 개인정보 처리방침 링크 -->
         <activity

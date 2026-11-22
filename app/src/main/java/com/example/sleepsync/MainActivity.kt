@@ -12,36 +12,27 @@ import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
-import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
-import androidx.compose.foundation.layout.size
-import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.rememberScrollState
-import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.Delete
+import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
 import androidx.compose.material3.Button
-import androidx.compose.material3.Card
-import androidx.compose.material3.CardDefaults
 import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.ExperimentalMaterial3Api
 import androidx.compose.material3.ExtendedFloatingActionButton
-import androidx.compose.material3.HorizontalDivider
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
-import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Scaffold
 import androidx.compose.material3.SnackbarHost
 import androidx.compose.material3.SnackbarHostState
 import androidx.compose.material3.SnackbarResult
-import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.material3.TextButton
 import androidx.compose.material3.TopAppBar
@@ -65,30 +56,22 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
 import androidx.health.connect.client.HealthConnectClient
 import androidx.health.connect.client.PermissionController
-import androidx.health.connect.client.permission.HealthPermission
 import androidx.health.connect.client.records.SleepSessionRecord
 import androidx.health.connect.client.records.metadata.Metadata
-import androidx.health.connect.client.request.ReadRecordsRequest
-import androidx.health.connect.client.time.TimeRangeFilter
 import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
+import kotlinx.coroutines.CancellationException
+import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
-import java.time.Instant
+import kotlinx.coroutines.withContext
 import java.time.LocalDate
-import java.time.ZoneId
 import java.time.ZonedDateTime
-import java.time.format.DateTimeFormatter
-import java.util.Locale
-
-private val READ_SLEEP = HealthPermission.getReadPermission(SleepSessionRecord::class)
-private val WRITE_SLEEP = HealthPermission.getWritePermission(SleepSessionRecord::class)
-private val SLEEP_PERMISSIONS = setOf(READ_SLEEP, WRITE_SLEEP)
-private const val SAMSUNG_HEALTH_PACKAGE = "com.sec.android.app.shealth"
 
 class MainActivity : ComponentActivity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         enableEdgeToEdge()
         super.onCreate(savedInstanceState)
+        scheduleBackgroundSync(this)
         setContent {
             SleepTheme {
                 SleepScreen()
@@ -112,21 +95,25 @@ fun SleepScreen() {
     val scope = rememberCoroutineScope()
     val snackbarHostState = remember { SnackbarHostState() }
     val client = remember { runCatching { HealthConnectClient.getOrCreate(context) }.getOrNull() }
+    val requested = remember(client) { requestedPermissions(client) }
+    val archive = remember { SleepArchive(context) }
     val allNighterStore = remember { AllNighterStore(context) }
-    var allNighters by remember { mutableStateOf(allNighterStore.load()) }
     val goalStore = remember { SleepGoalStore(context) }
-    var targetMinutes by remember { mutableLongStateOf(goalStore.load()) }
-    var showGoalSheet by remember { mutableStateOf(false) }
 
-    var loadState by remember { mutableStateOf<LoadState>(LoadState.Loading) }
-    var records by remember { mutableStateOf<List<SleepSessionRecord>>(emptyList()) }
+    var sessions by remember { mutableStateOf(archive.sessionsBlocking()) }
+    var allNighters by remember { mutableStateOf(allNighterStore.load()) }
+    var targetMinutes by remember { mutableLongStateOf(goalStore.load()) }
+    var wakeTimes by remember { mutableStateOf(goalStore.loadWakeTimes()) }
+    var loadState by remember { mutableStateOf(if (sessions.isEmpty()) LoadState.Loading else LoadState.Ready) }
     var canWrite by remember { mutableStateOf(false) }
     var permissionRequested by rememberSaveable { mutableStateOf(false) }
+    var showCalendar by rememberSaveable { mutableStateOf(false) }
+    var showGoalSheet by remember { mutableStateOf(false) }
     var selectedDate by remember { mutableStateOf<LocalDate?>(null) }
     var addSheetDate by remember { mutableStateOf<LocalDate?>(null) }
     var addAfterGrant by remember { mutableStateOf<LocalDate?>(null) }
     var saving by remember { mutableStateOf(false) }
-    var pendingDelete by remember { mutableStateOf<SleepSessionRecord?>(null) }
+    var pendingDelete by remember { mutableStateOf<SleepSession?>(null) }
     var refreshKey by remember { mutableIntStateOf(0) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
@@ -146,7 +133,19 @@ fun SleepScreen() {
             addSheetDate = date
         } else {
             addAfterGrant = date
-            permissionLauncher.launch(SLEEP_PERMISSIONS)
+            permissionLauncher.launch(requested)
+        }
+    }
+
+    fun deleteAllNighter(date: LocalDate) {
+        allNighterStore.remove(date)
+        allNighters = allNighterStore.load()
+        scope.launch {
+            val result = snackbarHostState.showSnackbar("밤샘 기록을 지웠어요", actionLabel = "되돌리기")
+            if (result == SnackbarResult.ActionPerformed) {
+                allNighterStore.add(date)
+                allNighters = allNighterStore.load()
+            }
         }
     }
 
@@ -177,113 +176,145 @@ fun SleepScreen() {
         }
         val granted = client.permissionController.getGrantedPermissions()
         canWrite = WRITE_SLEEP in granted
-        if (!granted.containsAll(SLEEP_PERMISSIONS) && !permissionRequested) {
+        if (!granted.containsAll(requested) && !permissionRequested) {
             permissionRequested = true
-            permissionLauncher.launch(SLEEP_PERMISSIONS)
+            permissionLauncher.launch(requested)
         }
         if (READ_SLEEP !in granted) {
             loadState = LoadState.NeedsPermission
             return@LaunchedEffect
         }
-        loadState = runCatching { fetchSleepRecords(client) }
-            .onSuccess { records = it }
-            .fold(onSuccess = { LoadState.Ready }, onFailure = { LoadState.Failed })
+        try {
+            sessions = withContext(Dispatchers.IO) { archive.sync(client, READ_HISTORY in granted) }
+            loadState = LoadState.Ready
+        } catch (e: CancellationException) {
+            throw e
+        } catch (e: Exception) {
+            if (sessions.isEmpty()) {
+                loadState = LoadState.Failed
+            } else {
+                loadState = LoadState.Ready
+                snackbarHostState.showSnackbar("새 기록을 불러오지 못했어요. 보관된 기록을 보여드려요.")
+            }
+        }
     }
 
-    Scaffold(
-        topBar = {
-            TopAppBar(
-                title = { Text("수면 기록", fontWeight = FontWeight.SemiBold) },
-                actions = {
-                    IconButton(onClick = { refreshKey++ }) {
-                        Icon(Icons.Default.Refresh, contentDescription = "새로고침")
-                    }
-                    IconButton(onClick = { showGoalSheet = true }) {
-                        Icon(Icons.Default.Settings, contentDescription = "목표 수면 시간 설정")
-                    }
-                },
-                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
-            )
-        },
-        floatingActionButton = {
-            if (loadState == LoadState.Ready) {
-                ExtendedFloatingActionButton(
-                    onClick = { openAddSheet(defaultWakeDate()) },
-                    icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                    text = { Text("수면 추가") },
-                )
-            }
-        },
-        snackbarHost = { SnackbarHost(snackbarHostState) },
-        containerColor = MaterialTheme.colorScheme.background,
-    ) { padding ->
-        when (val state = loadState) {
-            LoadState.Loading -> Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-                CircularProgressIndicator()
-            }
-            is LoadState.Unavailable -> MessageCard(padding, title = "Health Connect를 쓸 수 없어요", body = state.message)
-            LoadState.NeedsPermission -> MessageCard(
-                padding,
-                title = "수면 데이터 권한이 필요해요",
-                body = "워치로 측정한 수면을 불러오려면 Health Connect에서 수면 권한을 허용해주세요. " +
-                    "버튼을 눌러도 창이 뜨지 않으면 Health Connect 앱 → 앱 권한 → 수면 기록에서 허용할 수 있어요.",
-                actionLabel = "권한 허용하기",
-                onAction = { permissionLauncher.launch(SLEEP_PERMISSIONS) },
-            )
-            LoadState.Failed -> MessageCard(
-                padding,
-                title = "수면 기록을 불러오지 못했어요",
-                body = "잠시 후 다시 시도해주세요.",
-                actionLabel = "다시 시도",
-                onAction = { refreshKey++ },
-            )
-            LoadState.Ready -> {
-                val days = remember(records, allNighters) { dailySleepTotals(records, allNighters) }
-                val selected = selectedDate?.takeIf { date -> days.any { it.date == date } }
-                    ?: days.lastOrNull { it.minutes != null }?.date
-                    ?: days.last().date
-                val selectedIndex = days.indexOfFirst { it.date == selected }
-                val sessions = records.filter { sleepDate(it) == selected }.sortedBy { it.startTime }
+    LaunchedEffect(sessions, allNighters, targetMinutes, wakeTimes) {
+        withContext(Dispatchers.IO) { refreshWidget(context) }
+    }
 
-                Column(
-                    modifier = Modifier
-                        .fillMaxSize()
-                        .padding(padding)
-                        .verticalScroll(rememberScrollState())
-                        .padding(horizontal = 16.dp, vertical = 8.dp),
-                    verticalArrangement = Arrangement.spacedBy(12.dp),
-                ) {
-                    SleepDebtCard(debt = remember(days, targetMinutes) { calculateSleepDebt(days, targetMinutes) })
-                    SummaryRow(days, targetMinutes)
-                    SectionCard {
-                        SleepChart(
-                            days = days,
-                            targetMinutes = targetMinutes,
-                            selectedIndex = selectedIndex,
-                            onSelect = { selectedDate = days[it].date },
-                            modifier = Modifier.padding(20.dp),
-                        )
-                    }
-                    DayDetailCard(
-                        day = days[selectedIndex],
-                        sessions = sessions,
-                        targetMinutes = targetMinutes,
-                        ownPackage = context.packageName,
-                        onAdd = { openAddSheet(selected) },
-                        onDelete = { pendingDelete = it },
-                        onDeleteAllNighter = {
-                            allNighterStore.remove(selected)
-                            allNighters = allNighterStore.load()
-                            scope.launch {
-                                val result = snackbarHostState.showSnackbar("밤샘 기록을 지웠어요", actionLabel = "되돌리기")
-                                if (result == SnackbarResult.ActionPerformed) {
-                                    allNighterStore.add(selected)
-                                    allNighters = allNighterStore.load()
-                                }
+    if (showCalendar && loadState == LoadState.Ready) {
+        SleepCalendarScreen(
+            sessions = sessions,
+            allNighters = allNighters,
+            targetMinutes = targetMinutes,
+            ownPackage = context.packageName,
+            snackbarHostState = snackbarHostState,
+            onBack = { showCalendar = false },
+            onAdd = ::openAddSheet,
+            onDelete = { pendingDelete = it },
+            onDeleteAllNighter = ::deleteAllNighter,
+        )
+    } else {
+        Scaffold(
+            topBar = {
+                TopAppBar(
+                    title = { Text("수면 기록", fontWeight = FontWeight.SemiBold) },
+                    actions = {
+                        if (loadState == LoadState.Ready) {
+                            IconButton(onClick = { showCalendar = true }) {
+                                Icon(Icons.Default.DateRange, contentDescription = "수면 캘린더")
                             }
-                        },
+                        }
+                        IconButton(onClick = { refreshKey++ }) {
+                            Icon(Icons.Default.Refresh, contentDescription = "새로고침")
+                        }
+                        IconButton(onClick = { showGoalSheet = true }) {
+                            Icon(Icons.Default.Settings, contentDescription = "수면 목표 설정")
+                        }
+                    },
+                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+                )
+            },
+            floatingActionButton = {
+                if (loadState == LoadState.Ready) {
+                    ExtendedFloatingActionButton(
+                        onClick = { openAddSheet(defaultWakeDate()) },
+                        icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                        text = { Text("수면 추가") },
                     )
-                    Spacer(modifier = Modifier.height(80.dp))
+                }
+            },
+            snackbarHost = { SnackbarHost(snackbarHostState) },
+            containerColor = MaterialTheme.colorScheme.background,
+        ) { padding ->
+            when (val state = loadState) {
+                LoadState.Loading -> Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+                    CircularProgressIndicator()
+                }
+                is LoadState.Unavailable -> MessageCard(padding, title = "Health Connect를 쓸 수 없어요", body = state.message)
+                LoadState.NeedsPermission -> MessageCard(
+                    padding,
+                    title = "수면 데이터 권한이 필요해요",
+                    body = "워치로 측정한 수면을 불러오려면 Health Connect에서 수면 권한을 허용해주세요. " +
+                        "버튼을 눌러도 창이 뜨지 않으면 Health Connect 앱 → 앱 권한 → 수면 기록에서 허용할 수 있어요.",
+                    actionLabel = "권한 허용하기",
+                    onAction = { permissionLauncher.launch(requested) },
+                )
+                LoadState.Failed -> MessageCard(
+                    padding,
+                    title = "수면 기록을 불러오지 못했어요",
+                    body = "잠시 후 다시 시도해주세요.",
+                    actionLabel = "다시 시도",
+                    onAction = { refreshKey++ },
+                )
+                LoadState.Ready -> {
+                    val days = remember(sessions, allNighters) { dailySleep(lastDays(), sessions, allNighters) }
+                    val selected = selectedDate?.takeIf { date -> days.any { it.date == date } }
+                        ?: days.lastOrNull { it.minutes != null }?.date
+                        ?: days.last().date
+                    val selectedIndex = days.indexOfFirst { it.date == selected }
+                    val daySessions = sessions.filter { sleepDate(it) == selected }.sortedBy { it.start }
+
+                    Column(
+                        modifier = Modifier
+                            .fillMaxSize()
+                            .padding(padding)
+                            .verticalScroll(rememberScrollState())
+                            .padding(horizontal = 16.dp, vertical = 8.dp),
+                        verticalArrangement = Arrangement.spacedBy(12.dp),
+                    ) {
+                        val debt = remember(days, targetMinutes) { calculateSleepDebt(days, targetMinutes) }
+                        val bedtimeStats = remember(sessions) { analyzeBedtime(recentMainSleeps(sessions)) }
+                        SleepDebtCard(debt = debt)
+                        TonightPlanCard(
+                            plan = wakeTimes?.let { planTonight(it, bedtimeStats, debt.totalMinutes, targetMinutes) },
+                            stats = bedtimeStats,
+                            targetMinutes = targetMinutes,
+                            debtMinutes = debt.totalMinutes,
+                            onOpenSettings = { showGoalSheet = true },
+                        )
+                        SummaryRow(days, targetMinutes)
+                        SectionCard {
+                            SleepChart(
+                                days = days,
+                                targetMinutes = targetMinutes,
+                                selectedIndex = selectedIndex,
+                                onSelect = { selectedDate = days[it].date },
+                                modifier = Modifier.padding(20.dp),
+                            )
+                        }
+                        DayDetailCard(
+                            day = days[selectedIndex],
+                            sessions = daySessions,
+                            targetMinutes = targetMinutes,
+                            ownPackage = context.packageName,
+                            onAdd = { openAddSheet(selected) },
+                            onDelete = { pendingDelete = it },
+                            onDeleteAllNighter = { deleteAllNighter(selected) },
+                        )
+                        Spacer(modifier = Modifier.height(80.dp))
+                    }
                 }
             }
         }
@@ -292,30 +323,33 @@ fun SleepScreen() {
     addSheetDate?.let { date ->
         AddSleepSheet(
             initialWakeDate = date,
-            existingRecords = records,
+            existingSessions = sessions,
             allNighters = allNighters,
             targetMinutes = targetMinutes,
             saving = saving,
             onDismiss = { if (!saving) addSheetDate = null },
-            onSaveAllNighter = { date ->
-                allNighterStore.add(date)
+            onSaveAllNighter = { night ->
+                allNighterStore.add(night)
                 allNighters = allNighterStore.load()
                 addSheetDate = null
-                selectedDate = date
+                selectedDate = night
                 scope.launch { snackbarHostState.showSnackbar("밤샘으로 기록했어요") }
             },
             onSaveSleep = { start, end ->
                 val hc = client ?: return@AddSleepSheet
                 scope.launch {
                     saving = true
-                    val result = runCatching { insertManualSleep(hc, start, end) }
+                    val result = runCatching {
+                        val id = insertManualSleep(hc, start, end)
+                        archive.add(SleepSession(id, start.toInstant(), end.toInstant(), context.packageName, 0))
+                    }
                     saving = false
-                    if (result.isSuccess) {
+                    result.onSuccess {
+                        sessions = it
                         addSheetDate = null
                         selectedDate = end.toLocalDate()
-                        refreshKey++
                         snackbarHostState.showSnackbar("수면 기록을 추가했어요")
-                    } else {
+                    }.onFailure {
                         snackbarHostState.showSnackbar("저장하지 못했어요. 다시 시도해주세요.")
                     }
                 }
@@ -326,47 +360,39 @@ fun SleepScreen() {
     if (showGoalSheet) {
         SleepGoalSheet(
             currentMinutes = targetMinutes,
+            currentWakeTimes = wakeTimes,
             onDismiss = { showGoalSheet = false },
-            onSave = { minutes ->
-                goalStore.save(minutes)
+            onSave = { minutes, wakes ->
+                goalStore.save(minutes, wakes)
                 targetMinutes = minutes
+                wakeTimes = wakes
                 showGoalSheet = false
-                scope.launch { snackbarHostState.showSnackbar("목표를 ${formatDuration(minutes)}으로 바꿨어요") }
+                scope.launch { snackbarHostState.showSnackbar("수면 목표를 저장했어요") }
             },
         )
     }
 
-    pendingDelete?.let { record ->
+    pendingDelete?.let { session ->
         AlertDialog(
             onDismissRequest = { pendingDelete = null },
             title = { Text("이 기록을 삭제할까요?") },
-            text = { Text("${sessionTimeRange(record)} · ${formatDuration(sessionMinutes(record))}") },
+            text = { Text("${sessionTimeRange(session)} · ${formatDuration(sessionMinutes(session))}") },
             confirmButton = {
                 TextButton(onClick = {
                     pendingDelete = null
                     val hc = client ?: return@TextButton
                     scope.launch {
                         val result = runCatching {
-                            hc.deleteRecords(SleepSessionRecord::class, listOf(record.metadata.id), emptyList())
+                            hc.deleteRecords(SleepSessionRecord::class, listOf(session.id), emptyList())
+                            archive.remove(session.id)
                         }
-                        refreshKey++
+                        result.onSuccess { sessions = it }
                         snackbarHostState.showSnackbar(if (result.isSuccess) "기록을 삭제했어요" else "삭제하지 못했어요")
                     }
                 }) { Text("삭제") }
             },
             dismissButton = { TextButton(onClick = { pendingDelete = null }) { Text("취소") } },
         )
-    }
-}
-
-@Composable
-private fun SectionCard(modifier: Modifier = Modifier, content: @Composable () -> Unit) {
-    Card(
-        modifier = modifier.fillMaxWidth(),
-        shape = RoundedCornerShape(20.dp),
-        colors = CardDefaults.cardColors(containerColor = MaterialTheme.colorScheme.surface),
-    ) {
-        content()
     }
 }
 
@@ -405,138 +431,6 @@ private fun StatTile(label: String, value: String, caption: String, modifier: Mo
 }
 
 @Composable
-private fun DayDetailCard(
-    day: DailySleep,
-    sessions: List<SleepSessionRecord>,
-    targetMinutes: Long,
-    ownPackage: String,
-    onAdd: () -> Unit,
-    onDelete: (SleepSessionRecord) -> Unit,
-    onDeleteAllNighter: () -> Unit,
-) {
-    SectionCard {
-        Column(modifier = Modifier.padding(20.dp)) {
-            Text(
-                text = dayLabel(day.date),
-                style = MaterialTheme.typography.labelLarge,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-            Spacer(modifier = Modifier.height(6.dp))
-            if (day.minutes == null) {
-                Text(text = "기록 없음", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
-                Spacer(modifier = Modifier.height(4.dp))
-                Text(
-                    text = "워치를 차지 않고 잤거나 밤을 새웠다면 직접 추가할 수 있어요.",
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                Spacer(modifier = Modifier.height(16.dp))
-                OutlinedButton(onClick = onAdd) {
-                    Icon(Icons.Default.Add, contentDescription = null, modifier = Modifier.size(18.dp))
-                    Spacer(modifier = Modifier.width(6.dp))
-                    Text("이 날 기록 추가")
-                }
-            } else {
-                Text(
-                    text = formatDuration(day.minutes),
-                    style = MaterialTheme.typography.headlineSmall,
-                    fontWeight = FontWeight.SemiBold,
-                )
-                Spacer(modifier = Modifier.height(2.dp))
-                Text(
-                    text = targetComparison(day.minutes, targetMinutes),
-                    style = MaterialTheme.typography.bodyMedium,
-                    color = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-                HorizontalDivider(
-                    modifier = Modifier.padding(vertical = 12.dp),
-                    color = MaterialTheme.colorScheme.outlineVariant,
-                )
-                if (day.allNighter) {
-                    EntryRow(
-                        title = "밤샘",
-                        subtitle = "${day.date.minusDays(1).format(nightFormatter)} 밤에 자지 않았어요",
-                        source = "직접 입력",
-                        isManual = true,
-                        deleteDescription = "밤샘 기록 삭제",
-                        onDelete = onDeleteAllNighter,
-                    )
-                }
-                sessions.forEach { record ->
-                    SessionRow(
-                        record = record,
-                        isManual = record.metadata.dataOrigin.packageName == ownPackage,
-                        onDelete = { onDelete(record) },
-                    )
-                }
-            }
-        }
-    }
-}
-
-@Composable
-private fun SessionRow(record: SleepSessionRecord, isManual: Boolean, onDelete: () -> Unit) {
-    EntryRow(
-        title = sessionTimeRange(record),
-        subtitle = formatDuration(sessionMinutes(record)),
-        source = when {
-            isManual -> "직접 입력"
-            record.metadata.dataOrigin.packageName == SAMSUNG_HEALTH_PACKAGE -> "삼성 헬스"
-            else -> "다른 앱"
-        },
-        isManual = isManual,
-        deleteDescription = "직접 입력한 기록 삭제",
-        onDelete = onDelete,
-    )
-}
-
-private val nightFormatter = DateTimeFormatter.ofPattern("M월 d일", Locale.KOREAN)
-
-@Composable
-private fun EntryRow(
-    title: String,
-    subtitle: String,
-    source: String,
-    isManual: Boolean,
-    deleteDescription: String,
-    onDelete: () -> Unit,
-) {
-    Row(
-        modifier = Modifier.fillMaxWidth().height(56.dp),
-        verticalAlignment = Alignment.CenterVertically,
-    ) {
-        Column(modifier = Modifier.weight(1f)) {
-            Text(text = title, style = MaterialTheme.typography.bodyLarge)
-            Text(
-                text = subtitle,
-                style = MaterialTheme.typography.bodySmall,
-                color = MaterialTheme.colorScheme.onSurfaceVariant,
-            )
-        }
-        Surface(
-            color = if (isManual) MaterialTheme.colorScheme.secondaryContainer else MaterialTheme.colorScheme.surfaceVariant,
-            shape = RoundedCornerShape(50),
-        ) {
-            Text(
-                text = source,
-                style = MaterialTheme.typography.labelMedium,
-                color = if (isManual) MaterialTheme.colorScheme.onSecondaryContainer else MaterialTheme.colorScheme.onSurfaceVariant,
-                modifier = Modifier.padding(horizontal = 10.dp, vertical = 4.dp),
-            )
-        }
-        if (isManual) {
-            IconButton(onClick = onDelete) {
-                Icon(
-                    Icons.Default.Delete,
-                    contentDescription = deleteDescription,
-                    tint = MaterialTheme.colorScheme.onSurfaceVariant,
-                )
-            }
-        }
-    }
-}
-
-@Composable
 private fun MessageCard(
     padding: PaddingValues,
     title: String,
@@ -559,14 +453,7 @@ private fun MessageCard(
     }
 }
 
-private val sessionTimeFormatter = DateTimeFormatter.ofPattern("a h:mm", Locale.KOREAN)
-
-private fun sessionTimeRange(record: SleepSessionRecord): String {
-    val zone = ZoneId.systemDefault()
-    return "${record.startTime.atZone(zone).format(sessionTimeFormatter)} – ${record.endTime.atZone(zone).format(sessionTimeFormatter)}"
-}
-
-private suspend fun insertManualSleep(client: HealthConnectClient, start: ZonedDateTime, end: ZonedDateTime) {
+private suspend fun insertManualSleep(client: HealthConnectClient, start: ZonedDateTime, end: ZonedDateTime): String =
     client.insertRecords(
         listOf(
             SleepSessionRecord(
@@ -577,16 +464,4 @@ private suspend fun insertManualSleep(client: HealthConnectClient, start: ZonedD
                 metadata = Metadata(recordingMethod = Metadata.RECORDING_METHOD_MANUAL_ENTRY),
             )
         )
-    )
-}
-
-private suspend fun fetchSleepRecords(client: HealthConnectClient): List<SleepSessionRecord> {
-    val end = Instant.now()
-    // Start a day early so the oldest chart night, which began the evening before, is included.
-    val start = LocalDate.now().minusDays(7).atStartOfDay(ZoneId.systemDefault()).toInstant()
-    val request = ReadRecordsRequest(
-        recordType = SleepSessionRecord::class,
-        timeRangeFilter = TimeRangeFilter.between(start, end),
-    )
-    return client.readRecords(request).records
-}
+    ).recordIdsList.first()

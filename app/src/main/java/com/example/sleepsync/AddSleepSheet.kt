@@ -44,7 +44,6 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
-import androidx.health.connect.client.records.SleepSessionRecord
 import java.time.Duration
 import java.time.LocalDate
 import java.time.LocalTime
@@ -54,7 +53,7 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 private const val MAX_SLEEP_HOURS = 18L
-private const val SELECTABLE_DAYS = 7L
+const val SELECTABLE_DAYS = 30L
 private const val MILLIS_PER_DAY = 86_400_000L
 private val DEFAULT_BED_TIME = LocalTime.of(23, 0)
 private val DEFAULT_WAKE_TIME = LocalTime.of(7, 0)
@@ -70,7 +69,7 @@ private val shortDateFormatter = DateTimeFormatter.ofPattern("M월 d일 (E)", Lo
 @Composable
 fun AddSleepSheet(
     initialWakeDate: LocalDate,
-    existingRecords: List<SleepSessionRecord>,
+    existingSessions: List<SleepSession>,
     allNighters: Set<LocalDate>,
     targetMinutes: Long,
     saving: Boolean,
@@ -93,16 +92,16 @@ fun AddSleepSheet(
     val error = if (allNighterMode) {
         when {
             wakeDate in allNighters -> "이미 밤샘으로 기록된 날이에요."
-            existingRecords.any { sleepDate(it, zone) == wakeDate } -> "이 날에는 이미 수면 기록이 있어요."
+            existingSessions.any { sleepDate(it, zone) == wakeDate } -> "이 날에는 이미 수면 기록이 있어요."
             else -> null
         }
     } else {
-        val overlap = existingRecords.firstOrNull { it.startTime < end.toInstant() && it.endTime > start.toInstant() }
+        val overlap = existingSessions.firstOrNull { it.start < end.toInstant() && it.end > start.toInstant() }
         when {
             end.isAfter(ZonedDateTime.now(zone)) -> "일어난 시각이 아직 지나지 않았어요."
             minutes > MAX_SLEEP_HOURS * 60 -> "수면 시간은 ${MAX_SLEEP_HOURS}시간을 넘을 수 없어요."
             overlap != null -> "이 시간대에 이미 기록이 있어요 (" +
-                "${overlap.startTime.atZone(zone).format(timeFormatter)} – ${overlap.endTime.atZone(zone).format(timeFormatter)})"
+                "${overlap.start.atZone(zone).format(timeFormatter)} – ${overlap.end.atZone(zone).format(timeFormatter)})"
             else -> null
         }
     }
@@ -300,7 +299,14 @@ private fun WakeDatePickerDialog(initial: LocalDate, onDismiss: () -> Unit, onCo
 
 @OptIn(ExperimentalMaterial3Api::class)
 @Composable
-private fun TimePickerDialog(title: String, initial: LocalTime, onDismiss: () -> Unit, onConfirm: (LocalTime) -> Unit) {
+fun TimePickerDialog(
+    title: String,
+    initial: LocalTime,
+    onDismiss: () -> Unit,
+    onConfirm: (LocalTime) -> Unit,
+    extraActionLabel: String? = null,
+    onExtraAction: (LocalTime) -> Unit = {},
+) {
     val context = LocalContext.current
     val state = rememberTimePickerState(
         initialHour = initial.hour,
@@ -312,7 +318,12 @@ private fun TimePickerDialog(title: String, initial: LocalTime, onDismiss: () ->
         title = { Text(title) },
         text = { TimePicker(state = state) },
         confirmButton = {
-            TextButton(onClick = { onConfirm(LocalTime.of(state.hour, state.minute)) }) { Text("확인") }
+            Row {
+                if (extraActionLabel != null) {
+                    TextButton(onClick = { onExtraAction(LocalTime.of(state.hour, state.minute)) }) { Text(extraActionLabel) }
+                }
+                TextButton(onClick = { onConfirm(LocalTime.of(state.hour, state.minute)) }) { Text("확인") }
+            }
         },
         dismissButton = { TextButton(onClick = onDismiss) { Text("취소") } },
     )

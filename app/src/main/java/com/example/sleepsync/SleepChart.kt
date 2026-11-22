@@ -32,14 +32,13 @@ import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.rememberTextMeasurer
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.health.connect.client.records.SleepSessionRecord
 import java.time.LocalDate
 import java.time.ZoneId
 import java.time.format.DateTimeFormatter
 import java.time.temporal.ChronoUnit
 import java.util.Locale
 
-private data class ChartColors(
+data class ChartColors(
     val bar: Color,
     val barSelected: Color,
     val grid: Color,
@@ -69,31 +68,37 @@ private val DarkChartColors = ChartColors(
     mutedInk = Color(0xFF898781),
 )
 
+@Composable
+fun chartColors(): ChartColors = if (isSystemInDarkTheme()) DarkChartColors else LightChartColors
+
 data class DailySleep(val date: LocalDate, val minutes: Long?, val allNighter: Boolean = false)
 
-fun sleepDate(record: SleepSessionRecord, zone: ZoneId = ZoneId.systemDefault()): LocalDate =
-    record.endTime.atZone(zone).toLocalDate()
+fun sleepDate(session: SleepSession, zone: ZoneId = ZoneId.systemDefault()): LocalDate =
+    session.end.atZone(zone).toLocalDate()
 
-fun sessionMinutes(record: SleepSessionRecord): Long =
-    ChronoUnit.MINUTES.between(record.startTime, record.endTime)
+fun sessionMinutes(session: SleepSession): Long =
+    ChronoUnit.MINUTES.between(session.start, session.end)
 
 // A night belongs to the date you woke up; naps on the same date are added in.
 // An all-nighter date counts as recorded, starting from zero minutes.
-fun dailySleepTotals(
-    records: List<SleepSessionRecord>,
-    allNighters: Set<LocalDate> = emptySet(),
-    days: Int = 7,
+fun dailySleep(
+    dates: List<LocalDate>,
+    sessions: List<SleepSession>,
+    allNighters: Set<LocalDate>,
     zone: ZoneId = ZoneId.systemDefault(),
 ): List<DailySleep> {
-    val minutesByDate = records
+    val minutesByDate = sessions
         .groupBy { sleepDate(it, zone) }
-        .mapValues { (_, sessions) -> sessions.sumOf(::sessionMinutes) }
-    val today = LocalDate.now(zone)
-    return (days - 1 downTo 0).map { offset ->
-        val date = today.minusDays(offset.toLong())
+        .mapValues { (_, daySessions) -> daySessions.sumOf(::sessionMinutes) }
+    return dates.map { date ->
         val allNighter = date in allNighters
         DailySleep(date, minutesByDate[date] ?: if (allNighter) 0L else null, allNighter)
     }
+}
+
+fun lastDays(days: Int = 7): List<LocalDate> {
+    val today = LocalDate.now()
+    return (days - 1 downTo 0).map { today.minusDays(it.toLong()) }
 }
 
 fun formatDuration(minutes: Long): String {
@@ -130,7 +135,7 @@ fun SleepChart(
     onSelect: (Int) -> Unit,
     modifier: Modifier = Modifier,
 ) {
-    val colors = if (isSystemInDarkTheme()) DarkChartColors else LightChartColors
+    val colors = chartColors()
     val textMeasurer = rememberTextMeasurer()
     val axisStyle = TextStyle(fontSize = 11.sp, color = colors.mutedInk)
     val selectedAxisStyle = axisStyle.copy(color = colors.primaryInk, fontWeight = FontWeight.SemiBold)
