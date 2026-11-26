@@ -13,8 +13,13 @@ import androidx.work.OneTimeWorkRequestBuilder
 import androidx.work.PeriodicWorkRequestBuilder
 import androidx.work.WorkManager
 import androidx.work.WorkerParameters
+import kotlinx.coroutines.CancellationException
 import java.time.Duration
+import java.time.Instant
+import java.time.ZoneId
 import java.time.ZonedDateTime
+import java.time.format.DateTimeFormatter
+import java.util.Locale
 import java.util.concurrent.TimeUnit
 
 val READ_SLEEP = HealthPermission.getReadPermission(SleepSessionRecord::class)
@@ -65,19 +70,82 @@ fun refreshWidget(context: Context) {
 
 class SleepSyncWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {
+        val statusStore = SyncStatusStore(applicationContext)
         val client = runCatching { HealthConnectClient.getOrCreate(applicationContext) }.getOrNull()
-        if (client != null) {
-            runCatching {
+        if (client == null) {
+            statusStore.recordFailure()
+        } else {
+            try {
                 val granted = client.permissionController.getGrantedPermissions()
+                // Without background permission nothing is read here; the widget then shows how old its data is.
                 if (READ_SLEEP in granted && READ_IN_BACKGROUND in granted) {
                     SleepArchive(applicationContext).sync(client, READ_HISTORY in granted)
+                    statusStore.recordSuccess()
                 }
+            } catch (e: CancellationException) {
+                throw e
+            } catch (e: Exception) {
+                statusStore.recordFailure()
             }
         }
         refreshWidget(applicationContext)
         return Result.success()
     }
 }
+
+data class SyncStatus(val lastSuccess: Instant?, val lastFailure: Instant?) {
+    // True when the most recent attempt failed, so what's on screen may be older than it looks.
+    val lastAttemptFailed: Boolean
+        get() = lastFailure != null && (lastSuccess == null || lastFailure.isAfter(lastSuccess))
+}
+
+class SyncStatusStore(context: Context) {
+    private val prefs = context.getSharedPreferences("sync_status", Context.MODE_PRIVATE)
+
+    fun load() = SyncStatus(
+        lastSuccess = prefs.getLong(SUCCESS_KEY, 0L).takeIf { it > 0 }?.let(Instant::ofEpochMilli),
+        lastFailure = prefs.getLong(FAILURE_KEY, 0L).takeIf { it > 0 }?.let(Instant::ofEpochMilli),
+    )
+
+    fun recordSuccess() = prefs.edit().putLong(SUCCESS_KEY, System.currentTimeMillis()).apply()
+
+    fun recordFailure() = prefs.edit().putLong(FAILURE_KEY, System.currentTimeMillis()).apply()
+
+    private companion object {
+        const val SUCCESS_KEY = "last_success"
+        const val FAILURE_KEY = "last_failure"
+    }
+}
+
+private val syncClock = DateTimeFormatter.ofPattern("a h:mm", Locale.KOREAN)
+private val syncDate = DateTimeFormatter.ofPattern("M월 d일 a h:mm", Locale.KOREAN)
+
+// "방금", "12분 전", "오늘 오후 3:10", "어제 오후 3:10", "11월 24일 오후 3:10"
+fun syncTimeLabel(at: Instant, now: Instant = Instant.now(), zone: ZoneId = ZoneId.systemDefault()): String {
+    val minutesAgo = Duration.between(at, now).toMinutes()
+    val time = at.atZone(zone)
+    val today = now.atZone(zone).toLocalDate()
+    return when {
+        minutesAgo < 1 -> "방금"
+        minutesAgo < 60 -> "${minutesAgo}분 전"
+        time.toLocalDate() == today -> "오늘 ${time.format(syncClock)}"
+        time.toLocalDate() == today.minusDays(1) -> "어제 ${time.format(syncClock)}"
+        else -> time.format(syncDate)
+    }
+}
+
+// Widget label shown instead of "오늘 밤 추천 취침" when its numbers may be out of date; null when fresh.
+fun widgetSyncWarning(status: SyncStatus, now: Instant = Instant.now()): String? {
+    val success = status.lastSuccess ?: return null
+    val hoursAgo = Duration.between(success, now).toHours()
+    return when {
+        status.lastAttemptFailed -> "⚠ 업데이트 실패 · ${syncTimeLabel(success, now)} 기록"
+        hoursAgo >= WIDGET_STALE_HOURS -> "⚠ ${hoursAgo}시간 전 기록"
+        else -> null
+    }
+}
+
+private const val WIDGET_STALE_HOURS = 6L
 
 class WidgetRefreshWorker(context: Context, params: WorkerParameters) : CoroutineWorker(context, params) {
     override suspend fun doWork(): Result {

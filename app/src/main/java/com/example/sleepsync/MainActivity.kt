@@ -5,11 +5,15 @@ import androidx.activity.ComponentActivity
 import androidx.activity.compose.rememberLauncherForActivityResult
 import androidx.activity.compose.setContent
 import androidx.activity.enableEdgeToEdge
+import androidx.compose.animation.core.LinearEasing
+import androidx.compose.animation.core.animateFloat
+import androidx.compose.animation.core.infiniteRepeatable
+import androidx.compose.animation.core.rememberInfiniteTransition
+import androidx.compose.animation.core.tween
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.PaddingValues
-import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.height
@@ -18,7 +22,6 @@ import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.Add
-import androidx.compose.material.icons.filled.DateRange
 import androidx.compose.material.icons.filled.Refresh
 import androidx.compose.material.icons.filled.Settings
 import androidx.compose.material3.AlertDialog
@@ -50,6 +53,7 @@ import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.rotate
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.font.FontWeight
@@ -62,8 +66,11 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.LifecycleEventObserver
 import kotlinx.coroutines.CancellationException
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.NonCancellable
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.time.Instant
 import java.time.LocalDate
 import java.time.ZonedDateTime
 
@@ -107,7 +114,6 @@ fun SleepScreen() {
     var loadState by remember { mutableStateOf(if (sessions.isEmpty()) LoadState.Loading else LoadState.Ready) }
     var canWrite by remember { mutableStateOf(false) }
     var permissionRequested by rememberSaveable { mutableStateOf(false) }
-    var showCalendar by rememberSaveable { mutableStateOf(false) }
     var showGoalSheet by remember { mutableStateOf(false) }
     var selectedDate by remember { mutableStateOf<LocalDate?>(null) }
     var addSheetDate by remember { mutableStateOf<LocalDate?>(null) }
@@ -115,6 +121,11 @@ fun SleepScreen() {
     var saving by remember { mutableStateOf(false) }
     var pendingDelete by remember { mutableStateOf<SleepSession?>(null) }
     var refreshKey by remember { mutableIntStateOf(0) }
+    val syncStatusStore = remember { SyncStatusStore(context) }
+    var syncStatus by remember { mutableStateOf(syncStatusStore.load()) }
+    var syncing by remember { mutableStateOf(false) }
+    val tutorialStore = remember { TutorialStore(context) }
+    var showTutorial by remember { mutableStateOf(!tutorialStore.isDone()) }
 
     val permissionLauncher = rememberLauncherForActivityResult(
         contract = PermissionController.createRequestPermissionResultContract()
@@ -159,7 +170,7 @@ fun SleepScreen() {
     }
 
     LaunchedEffect(refreshKey) {
-        if (refreshKey == 0) return@LaunchedEffect
+        if (refreshKey == 0 || showTutorial) return@LaunchedEffect
         when (HealthConnectClient.getSdkStatus(context)) {
             HealthConnectClient.SDK_UNAVAILABLE -> {
                 loadState = LoadState.Unavailable("이 기기에서는 Health Connect를 사용할 수 없어요.")
@@ -184,137 +195,140 @@ fun SleepScreen() {
             loadState = LoadState.NeedsPermission
             return@LaunchedEffect
         }
+        syncing = true
+        val startedAt = System.currentTimeMillis()
         try {
             sessions = withContext(Dispatchers.IO) { archive.sync(client, READ_HISTORY in granted) }
+            syncStatusStore.recordSuccess()
             loadState = LoadState.Ready
         } catch (e: CancellationException) {
             throw e
         } catch (e: Exception) {
+            syncStatusStore.recordFailure()
             if (sessions.isEmpty()) {
                 loadState = LoadState.Failed
             } else {
                 loadState = LoadState.Ready
-                snackbarHostState.showSnackbar("새 기록을 불러오지 못했어요. 보관된 기록을 보여드려요.")
             }
+        } finally {
+            // Keep the spinner up briefly so a quick refresh is still visible as "it did something".
+            val elapsed = System.currentTimeMillis() - startedAt
+            if (elapsed < MIN_SPIN_MILLIS) withContext(NonCancellable) { delay(MIN_SPIN_MILLIS - elapsed) }
+            syncStatus = syncStatusStore.load()
+            syncing = false
         }
     }
 
-    LaunchedEffect(sessions, allNighters, targetMinutes, wakeTimes) {
+    LaunchedEffect(sessions, allNighters, targetMinutes, wakeTimes, syncStatus) {
         withContext(Dispatchers.IO) { refreshWidget(context) }
     }
 
-    if (showCalendar && loadState == LoadState.Ready) {
-        SleepCalendarScreen(
-            sessions = sessions,
-            allNighters = allNighters,
-            targetMinutes = targetMinutes,
-            ownPackage = context.packageName,
-            snackbarHostState = snackbarHostState,
-            onBack = { showCalendar = false },
-            onAdd = ::openAddSheet,
-            onDelete = { pendingDelete = it },
-            onDeleteAllNighter = ::deleteAllNighter,
-        )
-    } else {
-        Scaffold(
-            topBar = {
-                TopAppBar(
-                    title = { Text("수면 기록", fontWeight = FontWeight.SemiBold) },
-                    actions = {
-                        if (loadState == LoadState.Ready) {
-                            IconButton(onClick = { showCalendar = true }) {
-                                Icon(Icons.Default.DateRange, contentDescription = "수면 캘린더")
-                            }
-                        }
-                        IconButton(onClick = { refreshKey++ }) {
-                            Icon(Icons.Default.Refresh, contentDescription = "새로고침")
-                        }
-                        IconButton(onClick = { showGoalSheet = true }) {
-                            Icon(Icons.Default.Settings, contentDescription = "수면 목표 설정")
-                        }
-                    },
-                    colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
-                )
-            },
-            floatingActionButton = {
-                if (loadState == LoadState.Ready) {
-                    ExtendedFloatingActionButton(
-                        onClick = { openAddSheet(defaultWakeDate()) },
-                        icon = { Icon(Icons.Default.Add, contentDescription = null) },
-                        text = { Text("수면 추가") },
-                    )
-                }
-            },
-            snackbarHost = { SnackbarHost(snackbarHostState) },
-            containerColor = MaterialTheme.colorScheme.background,
-        ) { padding ->
-            when (val state = loadState) {
-                LoadState.Loading -> Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
-                    CircularProgressIndicator()
-                }
-                is LoadState.Unavailable -> MessageCard(padding, title = "Health Connect를 쓸 수 없어요", body = state.message)
-                LoadState.NeedsPermission -> MessageCard(
-                    padding,
-                    title = "수면 데이터 권한이 필요해요",
-                    body = "워치로 측정한 수면을 불러오려면 Health Connect에서 수면 권한을 허용해주세요. " +
-                        "버튼을 눌러도 창이 뜨지 않으면 Health Connect 앱 → 앱 권한 → 수면 기록에서 허용할 수 있어요.",
-                    actionLabel = "권한 허용하기",
-                    onAction = { permissionLauncher.launch(requested) },
-                )
-                LoadState.Failed -> MessageCard(
-                    padding,
-                    title = "수면 기록을 불러오지 못했어요",
-                    body = "잠시 후 다시 시도해주세요.",
-                    actionLabel = "다시 시도",
-                    onAction = { refreshKey++ },
-                )
-                LoadState.Ready -> {
-                    val days = remember(sessions, allNighters) { dailySleep(lastDays(), sessions, allNighters) }
-                    val selected = selectedDate?.takeIf { date -> days.any { it.date == date } }
-                        ?: days.lastOrNull { it.minutes != null }?.date
-                        ?: days.last().date
-                    val selectedIndex = days.indexOfFirst { it.date == selected }
-                    val daySessions = sessions.filter { sleepDate(it) == selected }.sortedBy { it.start }
+    if (showTutorial) {
+        TutorialScreen(onFinish = {
+            tutorialStore.markDone()
+            showTutorial = false
+            refreshKey++
+        })
+        return
+    }
 
-                    Column(
-                        modifier = Modifier
-                            .fillMaxSize()
-                            .padding(padding)
-                            .verticalScroll(rememberScrollState())
-                            .padding(horizontal = 16.dp, vertical = 8.dp),
-                        verticalArrangement = Arrangement.spacedBy(12.dp),
-                    ) {
-                        val debt = remember(days, targetMinutes) { calculateSleepDebt(days, targetMinutes) }
-                        val bedtimeStats = remember(sessions) { analyzeBedtime(recentMainSleeps(sessions)) }
-                        SleepDebtCard(debt = debt)
-                        TonightPlanCard(
-                            plan = wakeTimes?.let { planTonight(it, bedtimeStats, debt.totalMinutes, targetMinutes) },
-                            stats = bedtimeStats,
+    // The calendar screen (SleepCalendar.kt) is kept but not shown for now; all sessions stay archived.
+    Scaffold(
+        topBar = {
+            TopAppBar(
+                title = { Text("수면부채 계산", fontWeight = FontWeight.SemiBold) },
+                actions = {
+                    IconButton(onClick = { if (!syncing) refreshKey++ }) {
+                        RefreshIcon(spinning = syncing)
+                    }
+                    IconButton(onClick = { showGoalSheet = true }) {
+                        Icon(Icons.Default.Settings, contentDescription = "수면 목표 설정")
+                    }
+                },
+                colors = TopAppBarDefaults.topAppBarColors(containerColor = MaterialTheme.colorScheme.background),
+            )
+        },
+        floatingActionButton = {
+            if (loadState == LoadState.Ready) {
+                ExtendedFloatingActionButton(
+                    onClick = { openAddSheet(defaultWakeDate()) },
+                    icon = { Icon(Icons.Default.Add, contentDescription = null) },
+                    text = { Text("수면 추가") },
+                )
+            }
+        },
+        snackbarHost = { SnackbarHost(snackbarHostState) },
+        containerColor = MaterialTheme.colorScheme.background,
+    ) { padding ->
+        when (val state = loadState) {
+            LoadState.Loading -> Box(Modifier.fillMaxSize().padding(padding), contentAlignment = Alignment.Center) {
+                CircularProgressIndicator()
+            }
+            is LoadState.Unavailable -> MessageCard(padding, title = "Health Connect를 쓸 수 없어요", body = state.message)
+            LoadState.NeedsPermission -> MessageCard(
+                padding,
+                title = "수면 데이터 권한이 필요해요",
+                body = "워치로 측정한 수면을 불러오려면 Health Connect에서 수면 권한을 허용해주세요. " +
+                    "버튼을 눌러도 창이 뜨지 않으면 Health Connect 앱 → 앱 권한 → 수면 기록에서 허용할 수 있어요.",
+                actionLabel = "권한 허용하기",
+                onAction = { permissionLauncher.launch(requested) },
+            )
+            LoadState.Failed -> MessageCard(
+                padding,
+                title = "수면 기록을 불러오지 못했어요",
+                body = "잠시 후 다시 시도해주세요.",
+                actionLabel = "다시 시도",
+                onAction = { refreshKey++ },
+            )
+            LoadState.Ready -> {
+                val days = remember(sessions, allNighters) { dailySleep(lastDays(), sessions, allNighters) }
+                // Day details stay hidden until a bar is tapped; tapping the same bar again hides them.
+                val selectedIndex = days.indexOfFirst { it.date == selectedDate }.takeIf { it >= 0 }
+
+                Column(
+                    modifier = Modifier
+                        .fillMaxSize()
+                        .padding(padding)
+                        .verticalScroll(rememberScrollState())
+                        .padding(horizontal = 16.dp, vertical = 8.dp),
+                    verticalArrangement = Arrangement.spacedBy(12.dp),
+                ) {
+                    val debt = remember(days, targetMinutes) { calculateSleepDebt(days, targetMinutes) }
+                    val bedtimeStats = remember(sessions) { analyzeBedtime(recentMainSleeps(sessions)) }
+                    SyncStatusLine(status = syncStatus, syncing = syncing)
+                    SleepDebtCard(debt = debt)
+                    SectionCard {
+                        SleepChart(
+                            days = days,
                             targetMinutes = targetMinutes,
-                            debtMinutes = debt.totalMinutes,
-                            onOpenSettings = { showGoalSheet = true },
+                            selectedIndex = selectedIndex,
+                            onSelect = { index ->
+                                val tapped = days[index].date
+                                selectedDate = if (tapped == selectedDate) null else tapped
+                            },
+                            modifier = Modifier.padding(20.dp),
                         )
-                        SummaryRow(days, targetMinutes)
-                        SectionCard {
-                            SleepChart(
-                                days = days,
-                                targetMinutes = targetMinutes,
-                                selectedIndex = selectedIndex,
-                                onSelect = { selectedDate = days[it].date },
-                                modifier = Modifier.padding(20.dp),
-                            )
-                        }
+                    }
+                    if (selectedIndex != null) {
+                        val day = days[selectedIndex]
                         DayDetailCard(
-                            day = days[selectedIndex],
-                            sessions = daySessions,
+                            day = day,
+                            sessions = sessions.filter { sleepDate(it) == day.date }.sortedBy { it.start },
                             targetMinutes = targetMinutes,
                             ownPackage = context.packageName,
-                            onAdd = { openAddSheet(selected) },
+                            onAdd = { openAddSheet(day.date) },
                             onDelete = { pendingDelete = it },
-                            onDeleteAllNighter = { deleteAllNighter(selected) },
+                            onDeleteAllNighter = { deleteAllNighter(day.date) },
                         )
-                        Spacer(modifier = Modifier.height(80.dp))
                     }
+                    TonightPlanCard(
+                        plan = wakeTimes?.let { planTonight(it, bedtimeStats, debt.totalMinutes, targetMinutes) },
+                        stats = bedtimeStats,
+                        targetMinutes = targetMinutes,
+                        debtMinutes = debt.totalMinutes,
+                        onOpenSettings = { showGoalSheet = true },
+                    )
+                    Spacer(modifier = Modifier.height(80.dp))
                 }
             }
         }
@@ -396,38 +410,52 @@ fun SleepScreen() {
     }
 }
 
-@Composable
-private fun SummaryRow(days: List<DailySleep>, targetMinutes: Long) {
-    val recorded = days.mapNotNull { it.minutes }
-    val average = if (recorded.isEmpty()) null else recorded.sum() / recorded.size
-    val metGoal = recorded.count { it >= targetMinutes }
-    Row(horizontalArrangement = Arrangement.spacedBy(12.dp)) {
-        StatTile(
-            label = "평균 수면",
-            value = average?.let(::formatDuration) ?: "–",
-            caption = "기록된 ${recorded.size}일 기준",
-            modifier = Modifier.weight(1f),
-        )
-        StatTile(
-            label = "목표 달성",
-            value = "${metGoal}일",
-            caption = "최근 7일 중",
-            modifier = Modifier.weight(1f),
-        )
-    }
-}
+private const val MIN_SPIN_MILLIS = 700L
 
 @Composable
-private fun StatTile(label: String, value: String, caption: String, modifier: Modifier = Modifier) {
-    SectionCard(modifier = modifier) {
-        Column(modifier = Modifier.padding(16.dp)) {
-            Text(text = label, style = MaterialTheme.typography.labelLarge, color = MaterialTheme.colorScheme.onSurfaceVariant)
-            Spacer(modifier = Modifier.height(6.dp))
-            Text(text = value, style = MaterialTheme.typography.titleLarge, fontWeight = FontWeight.SemiBold)
-            Spacer(modifier = Modifier.height(2.dp))
-            Text(text = caption, style = MaterialTheme.typography.bodySmall, color = MaterialTheme.colorScheme.onSurfaceVariant)
+private fun RefreshIcon(spinning: Boolean) {
+    val rotation = if (spinning) {
+        rememberInfiniteTransition(label = "refresh").animateFloat(
+            initialValue = 0f,
+            targetValue = 360f,
+            animationSpec = infiniteRepeatable(tween(durationMillis = 900, easing = LinearEasing)),
+            label = "refreshRotation",
+        ).value
+    } else {
+        0f
+    }
+    Icon(
+        Icons.Default.Refresh,
+        contentDescription = if (spinning) "새 기록을 불러오는 중" else "새로고침",
+        modifier = Modifier.rotate(rotation),
+    )
+}
+
+// "방금 업데이트" / "12분 전 업데이트", or a warning when the last attempt to read new records failed.
+@Composable
+private fun SyncStatusLine(status: SyncStatus, syncing: Boolean) {
+    var now by remember { mutableStateOf(Instant.now()) }
+    LaunchedEffect(Unit) {
+        while (true) {
+            delay(30_000)
+            now = Instant.now()
         }
     }
+    val success = status.lastSuccess
+    val text = when {
+        syncing -> "새 기록을 불러오는 중…"
+        status.lastAttemptFailed && success != null ->
+            "새 기록을 불러오지 못했어요 · 마지막 업데이트 ${syncTimeLabel(success, now)}"
+        status.lastAttemptFailed -> "새 기록을 불러오지 못했어요"
+        success != null -> "${syncTimeLabel(success, now)} 업데이트"
+        else -> return
+    }
+    Text(
+        text = text,
+        style = MaterialTheme.typography.bodySmall,
+        color = if (!syncing && status.lastAttemptFailed) MaterialTheme.colorScheme.error else MaterialTheme.colorScheme.onSurfaceVariant,
+        modifier = Modifier.padding(horizontal = 4.dp),
+    )
 }
 
 @Composable

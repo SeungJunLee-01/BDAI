@@ -53,7 +53,10 @@ import java.time.format.DateTimeFormatter
 import java.util.Locale
 
 private const val MAX_SLEEP_HOURS = 18L
-const val SELECTABLE_DAYS = 30L
+// Anything this long is still allowed, but asked about once: it's usually an AM/PM mix-up.
+private const val CONFIRM_SLEEP_HOURS = 12L
+// Matches the 7 days on the main screen, so every added record can be seen and deleted there.
+const val SELECTABLE_DAYS = 7L
 private const val MILLIS_PER_DAY = 86_400_000L
 private val DEFAULT_BED_TIME = LocalTime.of(23, 0)
 private val DEFAULT_WAKE_TIME = LocalTime.of(7, 0)
@@ -83,6 +86,7 @@ fun AddSleepSheet(
     var bedTime by remember { mutableStateOf(DEFAULT_BED_TIME) }
     var wakeTime by remember { mutableStateOf(DEFAULT_WAKE_TIME) }
     var picker by remember { mutableStateOf<PickerTarget?>(null) }
+    var confirmLong by remember { mutableStateOf(false) }
 
     // A bedtime later than the wake time means you fell asleep the night before.
     val bedDate = if (bedTime < wakeTime) wakeDate else wakeDate.minusDays(1)
@@ -207,7 +211,13 @@ fun AddSleepSheet(
 
             Spacer(modifier = Modifier.height(20.dp))
             Button(
-                onClick = { if (allNighterMode) onSaveAllNighter(wakeDate) else onSaveSleep(start, end) },
+                onClick = {
+                    when {
+                        allNighterMode -> onSaveAllNighter(wakeDate)
+                        minutes >= CONFIRM_SLEEP_HOURS * 60 -> confirmLong = true
+                        else -> onSaveSleep(start, end)
+                    }
+                },
                 enabled = error == null && !saving,
                 modifier = Modifier.fillMaxWidth().height(52.dp),
             ) {
@@ -218,6 +228,27 @@ fun AddSleepSheet(
                 }
             }
         }
+    }
+
+    if (confirmLong) {
+        AlertDialog(
+            onDismissRequest = { confirmLong = false },
+            title = { Text("${formatDuration(minutes)} 잔 게 맞나요?") },
+            text = {
+                Text(
+                    "잠든 시각 ${start.format(shortDateFormatter)} ${start.format(timeFormatter)}\n" +
+                        "일어난 시각 ${end.format(shortDateFormatter)} ${end.format(timeFormatter)}\n\n" +
+                        "오전과 오후를 바꿔 고르지 않았는지 확인해 주세요.",
+                )
+            },
+            confirmButton = {
+                TextButton(onClick = {
+                    confirmLong = false
+                    onSaveSleep(start, end)
+                }) { Text("맞아요, 저장") }
+            },
+            dismissButton = { TextButton(onClick = { confirmLong = false }) { Text("다시 고치기") } },
+        )
     }
 
     when (picker) {
