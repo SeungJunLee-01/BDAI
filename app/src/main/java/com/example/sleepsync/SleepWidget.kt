@@ -56,6 +56,10 @@ private fun buildViews(context: Context): Pair<RemoteViews, ZonedDateTime?> {
         return views to null
     }
 
+    // When the data may be out of date, the top line says so instead of the usual label.
+    val warning = widgetSyncWarning(SyncStatusStore(context).load())
+    fun label(normal: String) = warning ?: normal
+
     val goals = SleepGoalStore(context)
     val target = goals.load()
     val debt = calculateSleepDebt(dailySleep(lastDays(), sessions, allNighters), target).totalMinutes
@@ -63,18 +67,18 @@ private fun buildViews(context: Context): Pair<RemoteViews, ZonedDateTime?> {
 
     val wakeTimes = goals.loadWakeTimes()
     if (wakeTimes == null) {
-        views.setTextViewText(R.id.widget_label, "오늘 밤 추천 취침")
+        views.setTextViewText(R.id.widget_label, label("오늘 밤 추천 취침"))
         views.setTextViewText(R.id.widget_bedtime, "기상 목표 설정 필요")
         return views to null
     }
 
     val plan = planTonight(wakeTimes, analyzeBedtime(recentMainSleeps(sessions)), debt, target)
     if (plan.availableIfLate != null) {
-        views.setTextViewText(R.id.widget_label, "추천 취침 ${plan.bedtime.format(widgetClock)} 지남")
+        views.setTextViewText(R.id.widget_label, label("추천 취침 ${plan.bedtime.format(widgetClock)} 지남"))
         views.setTextViewText(R.id.widget_bedtime, "지금 주무세요")
         return views to null
     }
-    views.setTextViewText(R.id.widget_label, "오늘 밤 추천 취침")
+    views.setTextViewText(R.id.widget_label, label("오늘 밤 추천 취침"))
     views.setTextViewText(R.id.widget_bedtime, plan.bedtime.format(widgetClock))
     return views to plan.bedtime
 }

@@ -4,11 +4,22 @@ import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
+import androidx.compose.foundation.layout.width
+import androidx.compose.material.icons.Icons
+import androidx.compose.material.icons.filled.KeyboardArrowDown
+import androidx.compose.material.icons.filled.KeyboardArrowUp
 import androidx.compose.material3.HorizontalDivider
+import androidx.compose.material3.Icon
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.material3.OutlinedButton
 import androidx.compose.material3.Text
+import androidx.compose.material3.TextButton
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.getValue
+import androidx.compose.runtime.mutableStateOf
+import androidx.compose.runtime.saveable.rememberSaveable
+import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.unit.dp
@@ -126,8 +137,9 @@ fun TonightPlanCard(
     onOpenSettings: () -> Unit,
 ) {
     val muted = MaterialTheme.colorScheme.onSurfaceVariant
+    var expanded by rememberSaveable { mutableStateOf(false) }
     SectionCard {
-        Column(modifier = Modifier.padding(20.dp)) {
+        Column(modifier = Modifier.padding(start = 20.dp, end = 20.dp, top = 20.dp, bottom = 12.dp)) {
             Text(text = "오늘 밤 추천", style = MaterialTheme.typography.labelLarge, color = muted)
             Spacer(modifier = Modifier.height(6.dp))
 
@@ -150,8 +162,7 @@ fun TonightPlanCard(
                 Text(text = "지금 바로 주무세요", style = MaterialTheme.typography.headlineSmall, fontWeight = FontWeight.SemiBold)
                 Spacer(modifier = Modifier.height(2.dp))
                 Text(
-                    text = "추천 취침은 ${plan.bedtime.format(clock)}였어요. 지금 자면 ${plan.wake.format(clock)} 기상까지 " +
-                        "${formatDuration(plan.availableIfLate.coerceAtLeast(0))} 잘 수 있어요. ($wakeLabel)",
+                    text = "$wakeLabel · 지금 자면 ${formatDuration(plan.availableIfLate.coerceAtLeast(0))} 수면",
                     style = MaterialTheme.typography.bodyMedium,
                     color = muted,
                 )
@@ -169,12 +180,31 @@ fun TonightPlanCard(
                 )
             }
 
+            Spacer(modifier = Modifier.height(4.dp))
+            TextButton(onClick = { expanded = !expanded }) {
+                Text(if (expanded) "추천 이유 접기" else "추천 이유 보기")
+                Spacer(modifier = Modifier.width(4.dp))
+                Icon(
+                    imageVector = if (expanded) Icons.Default.KeyboardArrowUp else Icons.Default.KeyboardArrowDown,
+                    contentDescription = null,
+                    modifier = Modifier.size(18.dp),
+                )
+            }
+            if (!expanded) return@Column
+
             val goalBreakdown = if (plan.extraMinutes == 0L) {
                 "목표 ${formatDuration(targetMinutes)}"
             } else {
                 "목표 ${formatDuration(targetMinutes)} + 부채 갚기 ${formatDuration(plan.extraMinutes)}"
             }
-            Spacer(modifier = Modifier.height(8.dp))
+            Spacer(modifier = Modifier.height(4.dp))
+            if (plan.availableIfLate != null) {
+                Text(
+                    text = "추천 취침은 ${plan.bedtime.format(clock)}였어요.",
+                    style = MaterialTheme.typography.bodyMedium,
+                )
+                Spacer(modifier = Modifier.height(4.dp))
+            }
             if (plan.daysToGoalBedtime > 0 && stats != null) {
                 Text(
                     text = "필요한 수면은 ${formatDuration(plan.goalSleepMinutes)}($goalBreakdown)이라 " +

@@ -149,9 +149,20 @@ fun SleepChart(
             (day.minutes?.let { formatDuration(it) + ", " + targetComparison(it, targetMinutes) } ?: "기록 없음")
     }
 
+    val recorded = days.mapNotNull { it.minutes }
+
     Column(modifier = modifier) {
         Row(verticalAlignment = Alignment.CenterVertically) {
-            Text(text = "최근 7일", style = MaterialTheme.typography.titleMedium, modifier = Modifier.weight(1f))
+            Column(modifier = Modifier.weight(1f)) {
+                Text(text = "최근 7일", style = MaterialTheme.typography.titleMedium)
+                if (recorded.isNotEmpty()) {
+                    Text(
+                        text = "평균 ${formatDuration(recorded.sum() / recorded.size)} · 기록 ${recorded.size}일",
+                        style = MaterialTheme.typography.bodySmall,
+                        color = colors.secondaryInk,
+                    )
+                }
+            }
             Canvas(modifier = Modifier.size(width = 18.dp, height = 2.dp)) {
                 drawLine(
                     color = colors.secondaryInk,

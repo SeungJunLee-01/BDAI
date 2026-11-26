@@ -14,7 +14,7 @@
 
     <application
         android:allowBackup="true"
-        android:label="수면 기록"
+        android:label="수면부채 계산"
         android:theme="@android:style/Theme.Material.Light.NoActionBar">
 
         <activity
